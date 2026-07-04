@@ -53,6 +53,7 @@ from param_decomp.checkpoint import (
 )
 from param_decomp.ci_fn import CIFnArch
 from param_decomp.configs import Cadence, PDConfig, ProfileConfig, flatten_typed_lists
+from param_decomp.jit_util import aot_memory
 from param_decomp.lm import DecomposedModel
 from param_decomp.recon import build_loss_terms
 from param_decomp.run_state import build_optimizers, init_train_state
@@ -598,18 +599,15 @@ def run_decomposition_training(
         _gib = 1024**3
         _mb = sample_batch(start_step)
         _mk = random.fold_in(run_key, start_step)
-        _step_jit: Any = (
-            step_fn  # eqx.filter_jit object exposes .lower(); the Callable alias hides it
-        )
-        _compiled = _step_jit.lower(lm, state, _mb, _mk).compile()
-        _ma = getattr(_compiled, "compiled", _compiled).memory_analysis()
+        _ma = aot_memory(step_fn, lm, state, _mb, _mk)
         if is_main:
             print(
                 "PD_MEM static memory_analysis(): "
-                f"argument={_ma.argument_size_in_bytes / _gib:.2f}GiB "
-                f"output={_ma.output_size_in_bytes / _gib:.2f}GiB "
-                f"temp={_ma.temp_size_in_bytes / _gib:.2f}GiB "
-                f"alias={_ma.alias_size_in_bytes / _gib:.2f}GiB",
+                f"argument={_ma.argument_bytes / _gib:.2f}GiB "
+                f"output={_ma.output_bytes / _gib:.2f}GiB "
+                f"temp={_ma.temp_bytes / _gib:.2f}GiB "
+                f"alias={_ma.alias_bytes / _gib:.2f}GiB "
+                f"peak={_ma.peak_bytes / _gib:.2f}GiB",
                 flush=True,
             )
         _dev = jax.local_devices()[0]

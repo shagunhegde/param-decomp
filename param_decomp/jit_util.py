@@ -8,11 +8,41 @@ call sites stay clean and typed.
 """
 
 from collections.abc import Callable
-from typing import Literal
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import equinox as eqx
 
 DonateMode = Literal["all", "all-except-first", "warn", "warn-except-first", "none"]
+
+
+@dataclass(frozen=True)
+class AOTMemory:
+    """XLA's static `memory_analysis()` of a compiled step, in bytes per device."""
+
+    argument_bytes: int
+    output_bytes: int
+    temp_bytes: int
+    alias_bytes: int
+
+    @property
+    def peak_bytes(self) -> int:
+        return self.temp_bytes + self.argument_bytes + self.output_bytes - self.alias_bytes
+
+
+def aot_memory(jitted: Any, *args: Any) -> AOTMemory:
+    """Allocation-free peak-memory probe: lower + compile `jitted(*args)` and read XLA's
+    static memory analysis, without executing the computation. `jitted` is a `jax.jit` /
+    `eqx.filter_jit` object (typed `Any` because the filter_jit Callable alias hides
+    `.lower`)."""
+    compiled = jitted.lower(*args).compile()
+    analysis = getattr(compiled, "compiled", compiled).memory_analysis()
+    return AOTMemory(
+        argument_bytes=analysis.argument_size_in_bytes,
+        output_bytes=analysis.output_size_in_bytes,
+        temp_bytes=analysis.temp_size_in_bytes,
+        alias_bytes=analysis.alias_size_in_bytes,
+    )
 
 
 def filter_jit[**P, T](
