@@ -104,7 +104,9 @@ def test_structure_stoch_is_per_chunk() -> None:
     assert "for entry_idx, entry in enumerate(term.plan)" in src, (
         "each recon term must loop its plan's entries"
     )
-    assert "/ n_forwards" in src, "each term must average over ALL forwards (every draw)"
+    assert "/ term.n_forwards" in src, (
+        "each term must average over ALL forwards (every draw), by its DECLARED count"
+    )
 
 
 def test_structure_recon_is_kl_not_mse() -> None:

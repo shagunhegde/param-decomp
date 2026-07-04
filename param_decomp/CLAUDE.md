@@ -178,6 +178,11 @@ Llama-8B suffix is multi-GB. Therefore:
 - **`inv_freq` is a buffer, not a param** — `stop_gradient` in `CIFn.__call__`.
 - **S10/S11**: chunking is sequential `sites_per_chunk` groups in canonical site
   order; routing is uniform-k over the chunk's sites only.
+- **Normalization contract** (`recon.Normalizer`): every `LossTerm` variant DECLARES the
+  global count its value divides by (`global_positions` / `global_param_numel` /
+  `plan_forwards`); the step divides by the declared `term.n_forwards` / `entry.n_draws`
+  only, never a runtime tally or inline pool constant. Enforced by
+  `tests/test_loss_contracts.py` (a new term without a declaration fails there).
 
 ## Validation stack (run all before claiming correctness)
 

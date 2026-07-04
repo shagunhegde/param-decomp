@@ -235,6 +235,7 @@ def make_train_step(
         """Mean KL over the entry's draws with FIXED source values — the adversarial
         ascent objective (shared by fresh and persistent ascents, SPEC S12'). `prepared` is
         the shared per-step compute weights (`prepare_compute_weights`)."""
+        assert len(routes_per_draw) == entry.n_draws, (len(routes_per_draw), entry.n_draws)
         masks, delta_masks = source_masks(ci_lower, sources, entry.live_sites)
         total = jnp.zeros((), jnp.float32)
         for routes in routes_per_draw:
@@ -249,7 +250,7 @@ def make_train_step(
                 entry.has_delta,
             )
             total = total + recon_loss_fn(masked, clean_output)
-        return total / len(routes_per_draw)
+        return total / entry.n_draws
 
     @jaxtyped(typechecker=beartype)
     def step(
@@ -320,6 +321,10 @@ def make_train_step(
                 fresh_cfg = entry.sources
                 routing_key, init_key = random.split(random.fold_in(term_key, entry_idx))
                 routes_per_draw = entry.sample_routing(routing_key, leading)
+                assert len(routes_per_draw) == entry.n_draws, (
+                    f"sampler drifted from the declared draw count: "
+                    f"{len(routes_per_draw)} != {entry.n_draws}"
+                )
                 fixed_routes[(term_idx, entry_idx)] = routes_per_draw
                 live_specs = tuple(s for s in sites if s.name in entry.live_sites)
                 init = init_fresh_pgd_sources(
@@ -385,7 +390,6 @@ def make_train_step(
             for term_idx, term in enumerate(recon_terms):
                 term_key = random.fold_in(key, 1 + term_idx)
                 total = jnp.zeros((), jnp.float32)
-                n_forwards = 0
                 for entry_idx, entry in enumerate(term.plan):
                     entry_key, routing_key = random.split(random.fold_in(term_key, entry_idx))
                     match entry.sources:
@@ -393,6 +397,10 @@ def make_train_step(
                             routes_per_draw = fixed_routes[(term_idx, entry_idx)]
                         case _:
                             routes_per_draw = entry.sample_routing(routing_key, leading)
+                    assert len(routes_per_draw) == entry.n_draws, (
+                        f"sampler drifted from the declared draw count: "
+                        f"{len(routes_per_draw)} != {entry.n_draws}"
+                    )
                     for draw_idx, routes in enumerate(routes_per_draw):
                         draw_key = random.fold_in(entry_key, draw_idx)
 
@@ -448,9 +456,8 @@ def make_train_step(
                                         )
                                     )
                         total = total + recon_loss_fn(masked, clean_output)
-                        n_forwards += 1
-                assert n_forwards > 0, f"term {term.name!r} produced no forwards"
-                term_loss = total / n_forwards
+                # The DECLARED count (recon.Normalizer "plan_forwards"), never a runtime tally.
+                term_loss = total / term.n_forwards
                 term_losses.append(term_loss)
 
             total_loss = faith_coeff * faith_loss + imp_coeff * imp_lp + freq_coeff * imp_freq

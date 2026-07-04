@@ -15,6 +15,7 @@ entries) vary per step.
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import ClassVar, Literal
 
 from jax import random
 from jaxtyping import Array, PRNGKeyArray
@@ -102,6 +103,23 @@ class PersistentSources:
 MaskSourceStrategy = StochasticSources | ConstantSources | FreshPGDSources | PersistentSources
 
 
+Normalizer = Literal["global_positions", "global_param_numel", "plan_forwards"]
+"""The normalization CONTRACT a loss term declares — the honest global count its value (and
+therefore, via autodiff of the global-mean loss, its per-parameter gradient scale) divides by.
+There are no manual gradient reductions on the JAX line, so this count is the entire
+device-count-invariance story per term (SPEC D4):
+
+- `global_positions`: mean over the GLOBAL `math.prod(leading)` positions (batch × named
+  position axes). Under GSPMD the leading axes are the global batch, so plain `jnp` sums
+  reduce across shards inside the graph — never a per-shard count.
+- `global_param_numel`: `Σ_s numel(Δ_s)` over all decomposed sites; positions don't enter.
+- `plan_forwards`: the term's DECLARED total forward count, `Σ` over plan entries of the
+  entry's `n_draws` — static structure, never a runtime tally.
+
+Declared as a `ClassVar` on each `LossTerm` variant; `make_train_step` divides by the
+declared counts only, and `tests/test_loss_contracts.py` enforces declaration + agreement."""
+
+
 @dataclass(frozen=True)
 class ReconForward:
     """One plan entry: which sites run their decomposed path (`live_sites` — everything
@@ -113,6 +131,10 @@ class ReconForward:
     live_sites: tuple[str, ...]
     sample_routing: RoutingSampler
     sources: MaskSourceStrategy
+    n_draws: int
+    """The sampler's declared family size — `len(sample_routing(key, leading))`. Declared
+    here (not re-derived from the returned tuple) so the term's normalization count is
+    static data; the step asserts the sampler agrees at every draw site."""
 
     @property
     def has_delta(self) -> bool:
@@ -132,15 +154,25 @@ class ReconLossTerm:
     `kl_per_position` (SPEC S10'). `name` is the torch `instance_key` (`cfg.name` or
     the type literal) — the metric log key is `loss/<name>`."""
 
+    normalizer: ClassVar[Normalizer] = "plan_forwards"
+
     name: str
     coeff: float
     plan: ReconPlan
+
+    @property
+    def n_forwards(self) -> int:
+        """The declared `plan_forwards` count: every draw of every plan entry is one
+        forward, and the term is their plain mean (SPEC S10)."""
+        return sum(entry.n_draws for entry in self.plan)
 
 
 @dataclass(frozen=True)
 class FaithfulnessTerm:
     """Weight-space term: `Σ_s ‖Δ_s‖² / Σ_s numel` (SPEC S17). Carries no plan — its
     contribution reads the live weight deltas, not the masked forwards."""
+
+    normalizer: ClassVar[Normalizer] = "global_param_numel"
 
     name: str
     coeff: float
@@ -151,6 +183,8 @@ class ImportanceMinimalityTerm:
     """CI-space imp-min + entropy term (SPEC S7-S9). Carries the config so the step reads
     the annealed penalty parameter (`pnorm` / `gamma`) and `beta` straight off `cfg`. The
     config is either of the two imp-min penalties (`L_p` or smooth-L0)."""
+
+    normalizer: ClassVar[Normalizer] = "global_positions"
 
     name: str
     coeff: float
@@ -277,11 +311,13 @@ def make_plan(
     with `n_samples` routing draws from `routing` over the chunk's own sites (SPEC S11)
     and the shared `sources`. The chunking (`one_chunk`/`per_site`/`into_groups`) and the
     routing/source choices are orthogonal — see LOSS_PARITY_DESIGN.md."""
+    assert n_samples >= 1, f"a plan entry needs at least one draw, got n_samples={n_samples}"
     return tuple(
         ReconForward(
             live_sites=chunk,
             sample_routing=routing_sampler_from_config(routing, chunk, n_samples),
             sources=sources,
+            n_draws=n_samples,
         )
         for chunk in chunks
     )
@@ -442,6 +478,7 @@ def build_loss_terms(
     )
     assert recon_terms, "no recon loss terms configured"
     for term in recon_terms:
+        assert term.n_forwards >= 1, f"term {term.name!r} declares no forwards"
         for entry in term.plan:
             assert entry.live_sites and set(entry.live_sites) <= set(site_names), entry
     return LossSurface(faith, imp, tuple(recon_terms))
